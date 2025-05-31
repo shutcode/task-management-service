@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package proto;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "./pkg/models;models"; // Output to pkg/models
+
+message Task {
+  string id = 1;
+  string task_template_id = 2;
+  string name = 3;
+  string description = 4;
+  string params = 5; // JSON string for task parameters
+  string status = 6; // e.g., PENDING, RUNNING, COMPLETED, FAILED
+  string result = 7; // JSON string for task result
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message TaskTemplate {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string task_type = 4;        // User-defined type of the task
+  string param_schema = 5;   // JSON schema for params
+  string result_schema = 6;  // JSON schema for results
+  string executor_type = 7;  // Specifies which worker/plugin handles this task type
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}

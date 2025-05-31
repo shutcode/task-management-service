@@ -1,5 +1,7 @@
 # task-management-service
 
+## 功能描述
+
 一个通用的任务管理服务， 主要分为：
 - 任务管理功能task-manager, 提供任务管理相关的RESTful API， 功能包括：
   - 创建任务，包括任务类型，任务通用参数，任务参数（json schema 定义的 json data）等
@@ -16,3 +18,12 @@
   - 支持crontab 类型的任务调度
   - 也支持实时异步任务调度，用户调用任务创建接口后持久化到数据库后，直接写到对应类别的执行器的kafka队列中
 
+## 技术选型
+
+- golang 1.24.3
+- hertz
+- protobuf 
+- TiDB, gorm
+- kafka
+- json schema
+- gocron

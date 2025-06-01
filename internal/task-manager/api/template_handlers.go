@@ -11,47 +11,38 @@ import (
 	"gorm.io/gorm"
 
 	taskDB "task-management-service/internal/task-manager/db"
-	// services "task-management-service/internal/task-manager/services"
 )
 
 type TaskTemplateHandler struct {
 	DB *gorm.DB
-	// Scheduler *services.SchedulerService
 }
 
-func NewTaskTemplateHandler(db *gorm.DB /*, scheduler *services.SchedulerService */) *TaskTemplateHandler {
-	return &TaskTemplateHandler{DB: db /*, Scheduler: scheduler */}
+func NewTaskTemplateHandler(db *gorm.DB) *TaskTemplateHandler {
+	return &TaskTemplateHandler{DB: db}
 }
 
 type CreateTaskTemplateRequest struct {
-	Name           string `json:"name" validate:"required"`
+	Name           string `json:"name" validate:"required,gt=0"` // Changed to validate and added gt=0
 	Description    string `json:"description"`
-	TaskType       string `json:"task_type" validate:"required"`
-	ParamSchema    string `json:"param_schema" validate:"required"`
-	ResultSchema   string `json:"result_schema" validate:"required"`
-	ExecutorType   string `json:"executor_type" validate:"required"`
+	TaskType       string `json:"task_type" validate:"required,gt=0"` // Changed to validate and added gt=0
+	ParamSchema    string `json:"param_schema" validate:"required,gt=0"` // Changed to validate and added gt=0; schemas are JSON strings.
+	ResultSchema   string `json:"result_schema" validate:"required,gt=0"` // Changed to validate and added gt=0
+	ExecutorType   string `json:"executor_type" validate:"required,gt=0"` // Changed to validate and added gt=0
 	CronExpression string `json:"cron_expression,omitempty"`
 }
 
 func (h *TaskTemplateHandler) CreateTaskTemplate(ctx context.Context, c *app.RequestContext) {
 	var req CreateTaskTemplateRequest
 
-	// Separate Bind and Validate
 	if err := c.Bind(&req); err != nil {
 		log.Printf("CreateTaskTemplate: Bind failed: %v", err)
-		c.JSON(http.StatusBadRequest, utils.H{"error": "Invalid request payload (bind error): " + err.Error()})
+		c.JSON(http.StatusBadRequest, utils.H{"error": "Invalid request format: " + err.Error()})
 		return
 	}
 	if err := c.Validate(&req); err != nil {
-		log.Printf("CreateTaskTemplate: Validate failed: %v", err)
-		// err from Validate should be the validation error from go-playground/validator
-		c.JSON(http.StatusBadRequest, utils.H{"error": "Invalid request payload (validation error): " + err.Error()})
+		log.Printf("Validation error for CreateTaskTemplateRequest: %v, Request: %+v", err, req)
+		c.JSON(http.StatusBadRequest, utils.H{"error": "Invalid request payload: " + err.Error()})
 		return
-	}
-
-
-	if req.CronExpression != "" {
-		log.Printf("Received CronExpression: %s for template %s", req.CronExpression, req.Name)
 	}
 
 	tmpl := taskDB.TaskTemplate{
@@ -63,7 +54,6 @@ func (h *TaskTemplateHandler) CreateTaskTemplate(ctx context.Context, c *app.Req
 		ExecutorType:   req.ExecutorType,
 		CronExpression: req.CronExpression,
 	}
-
 	if result := h.DB.Create(&tmpl); result.Error != nil {
 		c.JSON(http.StatusInternalServerError, utils.H{"error": "Failed to create task template: " + result.Error.Error()})
 		return
@@ -72,7 +62,6 @@ func (h *TaskTemplateHandler) CreateTaskTemplate(ctx context.Context, c *app.Req
 	if tmpl.CronExpression != "" {
 		log.Printf("TaskTemplate ID %d created with CronExpression '%s'. Scheduler refresh might be needed.", tmpl.ID, tmpl.CronExpression)
 	}
-
 	c.JSON(http.StatusCreated, tmpl)
 }
 

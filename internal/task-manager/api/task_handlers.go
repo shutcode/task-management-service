@@ -28,19 +28,24 @@ func NewTaskHandler(db *gorm.DB, producer *kafka.Writer) *TaskHandler {
 }
 
 type CreateTaskRequest struct {
-	TaskTemplateID uint   `json:"task_template_id" validate:"required"`
-	Name           string `json:"name" validate:"required"`
+	TaskTemplateID uint   `json:"task_template_id" validate:"required"` // Assuming ID must be present
+	Name           string `json:"name" validate:"required,gt=0"`
 	Description    string `json:"description"`
-	Params         string `json:"params" validate:"required"`
+	Params         string `json:"params" validate:"required,gt=0"` // Ensures params JSON string is not empty
 }
-type UpdateTaskRequest struct { // Assuming no validation needed for partial updates, or add specific rules
+type UpdateTaskRequest struct {
 	Status *string `json:"status"`
 	Result *string `json:"result"`
 }
 
 func (h *TaskHandler) CreateTask(ctx context.Context, c *app.RequestContext) {
 	var req CreateTaskRequest
-	if err := c.BindAndValidate(&req); err != nil {
+	if err := c.Bind(&req); err != nil {
+		c.JSON(http.StatusBadRequest, utils.H{"error": "Invalid request format: " + err.Error()})
+		return
+	}
+	if err := c.Validate(&req); err != nil {
+		log.Printf("Validation error for CreateTaskRequest: %v, Request: %+v", err, req)
 		c.JSON(http.StatusBadRequest, utils.H{"error": "Invalid request payload: " + err.Error()})
 		return
 	}
@@ -165,7 +170,7 @@ func (h *TaskHandler) UpdateTask(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	var req UpdateTaskRequest
-	if err := c.BindAndValidate(&req); err != nil { // Note: UpdateTaskRequest has no validate tags currently
+	if err := c.BindAndValidate(&req); err != nil {
 		c.JSON(http.StatusBadRequest, utils.H{"error": "Invalid request payload: " + err.Error()})
 		return
 	}

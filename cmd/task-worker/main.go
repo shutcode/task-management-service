@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -13,8 +12,11 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"google.golang.org/protobuf/proto"
+
 	"task-management-service/internal/task-worker/executors"
 	"task-management-service/internal/task-worker/validation"
+	pb_kafka "task-management-service/pkg/pb/kafka_messages_pb"
 )
 
 const (
@@ -23,104 +25,138 @@ const (
 	DefaultGroupID      = "task-worker-group"
 	DefaultResultTopic  = "task_results"
 )
-type TaskResultPayload struct {
-	TaskID uint   `json:"task_id"`
-	Status string `json:"status"`
-	Result string `json:"result,omitempty"`
-	Error  string `json:"error,omitempty"`
-}
+
 func main() {
-	log.Println("Starting Task Worker Service...")
+	log.Println("Starting Task Worker Service (Protobuf mode)...")
 	executors.RegisterExecutor("echo-executor", &executors.EchoExecutor{})
+
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS"); if kafkaBrokers == "" { kafkaBrokers = DefaultKafkaBrokers }
 	taskTopic := os.Getenv("TASK_TOPIC"); if taskTopic == "" { taskTopic = DefaultTaskTopic }
 	groupID := os.Getenv("GROUP_ID"); if groupID == "" { groupID = DefaultGroupID }
 	resultTopic := os.Getenv("RESULT_TOPIC"); if resultTopic == "" { resultTopic = DefaultResultTopic }
 	brokerList := strings.Split(kafkaBrokers, ",")
-	reader := kafka.NewReader(kafka.ReaderConfig{
+
+	readerCfg := kafka.ReaderConfig{
 		Brokers: brokerList, GroupID: groupID, Topic: taskTopic,
 		MinBytes: 10e3, MaxBytes: 10e6, CommitInterval: time.Second, MaxWait: 3 * time.Second,
-	})
+	}
+	reader := kafka.NewReader(readerCfg)
 	defer reader.Close()
+
 	producer := kafka.NewWriter(kafka.WriterConfig{
 		Brokers: brokerList, Topic: resultTopic, Balancer: &kafka.LeastBytes{},
-		RequiredAcks: int(kafka.RequireOne), // Cast to int as last resort
+		RequiredAcks: int(kafka.RequireOne), // Cast to int
 		Async: false,
 	})
 	defer producer.Close()
-	log.Printf("Task Worker Kafka consumer configured for brokers: %s, topic: %s, groupID: %s", kafkaBrokers, taskTopic, groupID)
-    log.Printf("Task Worker Kafka producer configured for results topic: %s", resultTopic)
+
+	log.Printf("Task Worker (Protobuf) listening on topic '%s', group '%s'. Results to topic '%s'.", taskTopic, groupID, resultTopic)
+
 	signals := make(chan os.Signal, 1); signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background());
-	go func() { sig := <-signals; log.Printf("Task Worker: Shutdown signal received (%s). Cancelling context...", sig); cancel() }()
-	log.Println("Task Worker listening for messages...")
+
+	go func() {
+		sig := <-signals
+		log.Printf("Task Worker: Shutdown signal received (%s). Cancelling context...", sig)
+		cancel();
+	}()
+
 	for {
 		select {
-		case <-ctx.Done(): log.Println("Task Worker: Context cancelled. Exiting message loop."); return
+		case <-ctx.Done(): log.Println("Task Worker: Context done, worker shutting down."); return
 		default:
-			readCtx, readLoopCancel := context.WithTimeout(ctx, 1*time.Second)
-			m, err := reader.ReadMessage(readCtx); readLoopCancel()
-			if err == context.DeadlineExceeded { continue }
-			if err == context.Canceled { log.Println("Task Worker: Read context cancelled, likely due to shutdown."); continue }
-			if err == io.EOF { log.Println("Task Worker: Kafka reader closed (EOF). Exiting."); return }
-            if err != nil { log.Printf("Task Worker: Kafka read error: %v. Retrying...", err); time.Sleep(1 * time.Second); continue }
-			log.Printf("Task Worker: Received message: Topic %s, Partition %d, Offset %d", m.Topic, m.Partition, m.Offset)
-			var taskPayload executors.TaskPayload
-			if err := json.Unmarshal(m.Value, &taskPayload); err != nil {
-				log.Printf("Task Worker: Unmarshal error for task payload: %v. Value: %s", err, string(m.Value)); continue
-			}
-			if taskPayload.ParamSchema != "" {
-				err_val := validation.ValidateJSONWithSchema(taskPayload.ParamSchema, taskPayload.Params)
-				if err_val != nil {
-					log.Printf("Task Worker: Task params validation failed for task ID %d: %v. Params: %s",
-						taskPayload.TaskID, err_val, taskPayload.Params)
-					sendTaskResult(ctx, producer, TaskResultPayload{ TaskID: taskPayload.TaskID, Status: "FAILED", Error:  fmt.Sprintf("Parameter validation failed in worker: %s", err_val.Error()), }); continue
-				}
-				log.Printf("Task Worker: Params validated successfully for task ID %d.", taskPayload.TaskID)
-			} else {
-				log.Printf("Task Worker: No ParamSchema provided for task ID %d. Skipping params validation.", taskPayload.TaskID)
-			}
-			executor, err_exec := executors.GetExecutor(taskPayload.ExecutorType)
-			if err_exec != nil {
-				log.Printf("Task Worker: Error getting executor for type '%s': %v. Task ID: %d", taskPayload.ExecutorType, err_exec, taskPayload.TaskID)
-				sendTaskResult(ctx, producer, TaskResultPayload{ TaskID: taskPayload.TaskID, Status: "FAILED", Error: fmt.Sprintf("Executor type '%s' not found", taskPayload.ExecutorType), }); continue
-			}
-			go func(p executors.TaskPayload) {
-				res, execErr := executor.Execute(p)
-				trp := TaskResultPayload{TaskID: p.TaskID}
-				if execErr != nil {
-					log.Printf("Task Worker: Error executing task ID %d: %v", p.TaskID, execErr)
-					trp.Status = "FAILED"; trp.Error = execErr.Error()
-				} else {
-					log.Printf("Task Worker: Task ID %d completed successfully. Result: %s", p.TaskID, res)
-					trp.Status = "COMPLETED"; trp.Result = res
-				}
-				sendTaskResult(context.Background(), producer, trp)
-			}(taskPayload)
 		}
+
+		readCtx, readTimeoutCancel := context.WithTimeout(ctx, readerCfg.MaxWait + 1*time.Second)
+		m, err := reader.ReadMessage(readCtx)
+		readTimeoutCancel()
+
+		if err == context.DeadlineExceeded { continue }
+		if err == context.Canceled { log.Println("Task Worker: Read context cancelled during shutdown."); return }
+		if err == io.EOF { log.Println("Task Worker: Kafka reader closed (EOF), shutting down worker."); return }
+		if err != nil { log.Printf("Task Worker: Kafka read error: %v. Retrying...", err); time.Sleep(1 * time.Second); continue }
+
+		log.Printf("Received message: Topic %s, Partition %d, Offset %d, Key %s (expecting Protobuf)", m.Topic, m.Partition, m.Offset, string(m.Key))
+
+		var dispatchPb pb_kafka.KafkaTaskDispatch
+		if err_unmarshal := proto.Unmarshal(m.Value, &dispatchPb); err_unmarshal != nil {
+			log.Printf("Error unmarshalling KafkaTaskDispatch (Protobuf): %v. Value: %x", err_unmarshal, m.Value)
+			continue
+		}
+
+		log.Printf("Processing task (Protobuf): ID %d, Name: %s, Type: %s", dispatchPb.TaskId, dispatchPb.Name, dispatchPb.ExecutorType)
+
+		taskPayloadForExecutor := executors.TaskPayload{
+			TaskID:         dispatchPb.TaskId,
+			TaskTemplateID: dispatchPb.TaskTemplateId,
+			Name:           dispatchPb.Name,
+			Params:         dispatchPb.Params,
+			ExecutorType:   dispatchPb.ExecutorType,
+			ParamSchema:    dispatchPb.ParamSchema,
+		}
+
+		if taskPayloadForExecutor.ParamSchema != "" {
+			log.Printf("Task Worker: Validating params for task ID %d (Protobuf flow)", taskPayloadForExecutor.TaskID)
+			if err_val := validation.ValidateJSONWithSchema(taskPayloadForExecutor.ParamSchema, taskPayloadForExecutor.Params); err_val != nil {
+				log.Printf("Task Worker: Task params validation failed for task ID %d: %v", taskPayloadForExecutor.TaskID, err_val)
+				sendTaskCompletion(context.Background(), producer, dispatchPb.TaskId, "FAILED", "", fmt.Sprintf("Parameter validation failed in worker: %s", err_val.Error()))
+				continue
+			}
+			log.Printf("Task Worker: Params validated for task ID %d (Protobuf flow)", taskPayloadForExecutor.TaskID)
+		}
+
+		executor, err_exec := executors.GetExecutor(taskPayloadForExecutor.ExecutorType)
+		if err_exec != nil {
+			log.Printf("Error getting executor for type '%s': %v. Task ID: %d", taskPayloadForExecutor.ExecutorType, err_exec, taskPayloadForExecutor.TaskID)
+			sendTaskCompletion(context.Background(), producer, taskPayloadForExecutor.TaskID, "FAILED", "", fmt.Sprintf("Executor type '%s' not found", taskPayloadForExecutor.ExecutorType))
+			continue
+		}
+
+		go func(payload executors.TaskPayload) {
+			log.Printf("Executing task %d with %s (Protobuf flow)", payload.TaskID, payload.ExecutorType)
+			resultStr, execErr := executor.Execute(payload)
+
+			if execErr != nil {
+				log.Printf("Error executing task ID %d: %v", payload.TaskID, execErr)
+				sendTaskCompletion(context.Background(), producer, payload.TaskID, "FAILED", "", execErr.Error())
+			} else {
+				log.Printf("Task ID %d completed successfully. Result: %s", payload.TaskID, resultStr)
+				sendTaskCompletion(context.Background(), producer, payload.TaskID, "COMPLETED", resultStr, "")
+			}
+		}(taskPayloadForExecutor)
 	}
 }
 
-func sendTaskResult(ctx context.Context, producer *kafka.Writer, resultPayload TaskResultPayload) {
-	payloadBytes, err := json.Marshal(resultPayload)
+func sendTaskCompletion(ctx context.Context, producer *kafka.Writer, taskID uint32, status string, result string, errorMessage string) {
+	completionPb := &pb_kafka.KafkaTaskCompletion{
+		TaskId:       taskID,
+		Status:       status,
+		Result:       result,
+		ErrorMessage: errorMessage,
+	}
+
+	payloadBytes, err := proto.Marshal(completionPb)
 	if err != nil {
-		log.Printf("Task Worker: Error marshalling result payload for task ID %d: %v", resultPayload.TaskID, err)
+		log.Printf("Error marshalling KafkaTaskCompletion (Protobuf) for task ID %d: %v", taskID, err)
 		return
 	}
-	msg := kafka.Message{ Key: []byte(fmt.Sprintf("%d", resultPayload.TaskID)), Value: payloadBytes }
+
+	msg := kafka.Message{
+		Key:   []byte(fmt.Sprintf("%d", taskID)),
+		Value: payloadBytes,
+	}
 
 	writeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := producer.WriteMessages(writeCtx, msg); err != nil {
-		if writeCtx.Err() == context.Canceled {
-             log.Printf("Task Worker: Write context cancelled sending result for task ID %d: %v", resultPayload.TaskID, err)
-        } else if ctx.Err() == context.Canceled {
-             log.Printf("Task Worker: App context cancelled, could not send result for task ID %d.", resultPayload.TaskID)
-        } else {
-             log.Printf("Task Worker: Error sending result for task ID %d to Kafka: %v", resultPayload.TaskID, err)
-        }
+	err = producer.WriteMessages(writeCtx, msg)
+	if err != nil {
+		if writeCtx.Err() != nil {
+			log.Printf("Context error sending Protobuf result for task ID %d to Kafka: %v", taskID, writeCtx.Err())
+		} else {
+			log.Printf("Error sending Protobuf result for task ID %d to Kafka: %v", taskID, err)
+		}
 	} else {
-		log.Printf("Task Worker: Sent result for task ID %d to Kafka topic %s", resultPayload.TaskID, producer.Stats().Topic)
+		log.Printf("Successfully sent Protobuf result for task ID %d to Kafka topic %s", taskID, producer.Stats().Topic)
 	}
 }

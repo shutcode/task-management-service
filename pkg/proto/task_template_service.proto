@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package proto.task_template;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+option go_package = "task-management-service/pkg/proto/task_template;task_template_pb";
+
+// TaskTemplate message mirrors the GORM model structure
+message TaskTemplate {
+  uint32 id = 1; // Using uint32 as GORM default ID is uint
+  string name = 2;
+  string description = 3;
+  string task_type = 4;
+  string param_schema = 5;   // JSON schema string
+  string result_schema = 6;  // JSON schema string
+  string executor_type = 7;
+  string cron_expression = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+// --- Request/Response Messages ---
+
+message CreateTaskTemplateRequest {
+  string name = 1;
+  string description = 2;
+  string task_type = 3;
+  string param_schema = 4;
+  string result_schema = 5;
+  string executor_type = 6;
+  string cron_expression = 7;
+}
+
+message CreateTaskTemplateResponse {
+  TaskTemplate template = 1;
+}
+
+message GetTaskTemplateRequest {
+  uint32 id = 1;
+}
+
+message GetTaskTemplateResponse {
+  TaskTemplate template = 1;
+}
+
+message ListTaskTemplatesRequest {
+  // Potential future pagination fields:
+  // int32 page_size = 1;
+  // string page_token = 2;
+  // For now, lists all
+}
+
+message ListTaskTemplatesResponse {
+  repeated TaskTemplate templates = 1;
+  // string next_page_token = 2;
+}
+
+message UpdateTaskTemplateRequest {
+  uint32 id = 1;
+  string name = 2;
+  string description = 3;
+  string task_type = 4;
+  string param_schema = 5;
+  string result_schema = 6;
+  string executor_type = 7;
+  string cron_expression = 8;
+  // google.protobuf.FieldMask update_mask = 9; // For partial updates
+}
+
+message UpdateTaskTemplateResponse {
+  TaskTemplate template = 1;
+}
+
+message DeleteTaskTemplateRequest {
+  uint32 id = 1;
+}
+
+// DeleteTaskTemplateResponse can be Empty if no data needs to be returned
+// message DeleteTaskTemplateResponse {}
+
+
+// --- Service Definition ---
+
+service TaskTemplateService {
+  rpc CreateTaskTemplate(CreateTaskTemplateRequest) returns (CreateTaskTemplateResponse) {}
+  rpc GetTaskTemplate(GetTaskTemplateRequest) returns (GetTaskTemplateResponse) {}
+  rpc ListTaskTemplates(ListTaskTemplatesRequest) returns (ListTaskTemplatesResponse) {}
+  rpc UpdateTaskTemplate(UpdateTaskTemplateRequest) returns (UpdateTaskTemplateResponse) {}
+  rpc DeleteTaskTemplate(DeleteTaskTemplateRequest) returns (google.protobuf.Empty) {}
+}

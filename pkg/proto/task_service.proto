@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package proto.task;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+option go_package = "task-management-service/pkg/proto/task;task_pb";
+
+// Task message mirrors the GORM model structure
+message Task {
+  uint32 id = 1;
+  uint32 task_template_id = 2;
+  string name = 3;
+  string description = 4;
+  string params = 5;       // JSON string for task parameters
+  string status = 6;       // e.g., PENDING, RUNNING, COMPLETED, FAILED
+  string result = 7;       // JSON string for task result
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// --- Request/Response Messages ---
+
+message CreateTaskRequest {
+  uint32 task_template_id = 1;
+  string name = 2;
+  string description = 3;
+  string params = 4; // JSON string
+}
+
+message CreateTaskResponse {
+  Task task = 1;
+}
+
+message GetTaskRequest {
+  uint32 id = 1;
+}
+
+message GetTaskResponse {
+  Task task = 1;
+}
+
+message ListTasksRequest {
+  // Potential filters
+  string status = 1;
+  uint32 template_id = 2;
+  // Potential future pagination fields
+  // int32 page_size = 3;
+  // string page_token = 4;
+}
+
+message ListTasksResponse {
+  repeated Task tasks = 1;
+  // string next_page_token = 2;
+}
+
+// UpdateTaskRequest is typically for status and result
+message UpdateTaskRequest {
+  uint32 id = 1;
+  optional string status = 2;
+  optional string result = 3; // JSON string
+  // google.protobuf.FieldMask update_mask = 4; // For partial updates
+}
+
+message UpdateTaskResponse {
+  Task task = 1;
+}
+
+message DeleteTaskRequest {
+  uint32 id = 1;
+}
+// DeleteTaskResponse can be Empty
+
+// --- Service Definition ---
+
+service TaskService {
+  rpc CreateTask(CreateTaskRequest) returns (CreateTaskResponse) {}
+  rpc GetTask(GetTaskRequest) returns (GetTaskResponse) {}
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse) {}
+  rpc UpdateTask(UpdateTaskRequest) returns (UpdateTaskResponse) {}
+  rpc DeleteTask(DeleteTaskRequest) returns (google.protobuf.Empty) {} // If needed
+}

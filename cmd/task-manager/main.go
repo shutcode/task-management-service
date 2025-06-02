@@ -14,18 +14,21 @@ import (
 	"github.com/cloudwego/hertz/pkg/common/hlog"
 	"github.com/cloudwego/hertz/pkg/common/utils"
 
-	"task-management-service/internal/task-manager/api"
-	taskDB "task-management-service/internal/task-manager/db"
+	gorm_models "task-management-service/internal/task-manager/db"
 	tmKafka "task-management-service/internal/task-manager/kafka"
 	"task-management-service/internal/task-manager/services"
 	gorm_db "task-management-service/pkg/db"
+
+	generated_handler "task-management-service/internal/task-manager/interfaces/http/generated_handler"
+	// Use a single alias for the router package if both files are in it
+	generated_router "task-management-service/internal/task-manager/interfaces/http/generated_router"
 )
 
 func main() {
 	stdlog.Println("Task Manager Service starting...")
 
 	appCtx, appCancel := context.WithCancel(context.Background())
-	// defer appCancel() // Called explicitly in graceful shutdown
+	// Graceful shutdown will call appCancel
 
 	gormDB, err := gorm_db.NewGormDB()
 	if err != nil {
@@ -34,7 +37,7 @@ func main() {
 	stdlog.Println("Database initialized successfully.")
 
 	stdlog.Println("Running database migrations...")
-	err = gorm_db.AutoMigrate(gormDB, &taskDB.Task{}, &taskDB.TaskTemplate{})
+	err = gorm_db.AutoMigrate(gormDB, &gorm_models.Task{}, &gorm_models.TaskTemplate{})
 	if err != nil {
 		stdlog.Fatalf("Failed to migrate database: %v", err)
 	}
@@ -60,26 +63,20 @@ func main() {
 	hlog.SetLevel(hlog.LevelInfo)
 
 	h := server.Default(server.WithHostPorts(serverAddr), server.WithExitWaitTime(5*time.Second))
+	hlog.Infof("Hertz server will start on %s", serverAddr)
 
-	templateHandler := api.NewTaskTemplateHandler(gormDB)
-	taskHandler := api.NewTaskHandler(gormDB, kafkaProducer)
+	// --- Initialize Services and Register Routes ---
+	taskTemplateServiceImpl := generated_handler.NewTaskTemplateService(gormDB)
+	generated_router.RegisterTaskTemplateService(h, taskTemplateServiceImpl)
+	stdlog.Println("Registered new TaskTemplateService routes.")
 
-	templateGroup := h.Group("/templates")
-	{
-		templateGroup.POST("", templateHandler.CreateTaskTemplate)
-		templateGroup.GET("", templateHandler.GetTaskTemplates)
-		templateGroup.GET("/:id", templateHandler.GetTaskTemplateByID)
-        templateGroup.DELETE("/:id", templateHandler.DeleteTaskTemplate)
-	}
-	taskGroup := h.Group("/tasks")
-	{
-		taskGroup.POST("", taskHandler.CreateTask)
-		taskGroup.GET("", taskHandler.GetTasks)
-		taskGroup.GET("/:id", taskHandler.GetTaskByID)
-		taskGroup.PUT("/:id", taskHandler.UpdateTask)
-	}
+	taskServiceImpl := generated_handler.NewTaskService(gormDB, kafkaProducer)
+	generated_router.RegisterTaskService(h, taskServiceImpl) // Use the same generated_router package
+	stdlog.Println("Registered new TaskService routes.")
+	// --- End New Service Setup ---
+
 	adminGroup := h.Group("/admin")
-	adminGroup.POST("/scheduler/refresh", func(c context.Context, ctxReq *app.RequestContext){
+	adminGroup.POST("/scheduler/refresh", func(c context.Context, ctxReq *app.RequestContext) {
 		schedulerService.RefreshScheduledJobs()
 		ctxReq.JSON(http.StatusOK, utils.H{"message": "Scheduler refresh triggered"})
 	})
@@ -94,7 +91,7 @@ func main() {
 		sig := <-signals
 		hlog.Infof("Received signal: %s. Initiating graceful shutdown...", sig)
 
-		appCancel()
+		appCancel() // Cancels appCtx for services
 
 		shutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer httpShutdownCancel()
@@ -105,9 +102,7 @@ func main() {
 		}
 
 		schedulerService.Stop()
-
 		resultService.Close()
-		hlog.Info("Result service consumer closed.")
 
 		if err := kafkaProducer.Close(); err != nil {
 			hlog.Errorf("Kafka producer close error: %v", err)
@@ -118,8 +113,6 @@ func main() {
 	}()
 
 	hlog.Infof("Task Manager Service fully initialized and starting Hertz server on %s...", serverAddr)
-	// Corrected: h.Spin() does not return an error to be checked with if err := ...
-	// It's a blocking call. Fatal errors during startup are handled by Hertz.
 	h.Spin()
 
 	stdlog.Println("Task Manager Service has been shut down.")

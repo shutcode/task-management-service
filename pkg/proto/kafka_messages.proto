@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package proto.kafka;
+
+option go_package = "task-management-service/pkg/pb/kafka_messages_pb;kafka_messages_pb";
+
+// Message sent from TaskManager to TaskWorker to request task execution
+message KafkaTaskDispatch {
+  uint32 task_id = 1;
+  uint32 task_template_id = 2;
+  string name = 3;
+  string params = 4;         // JSON string for task parameters
+  string executor_type = 5;  // Specifies which worker/plugin handles this task type
+  string param_schema = 6;   // Optional: JSON schema for params, for worker-side validation
+}
+
+// Message sent from TaskWorker to TaskManager with the result of a task execution
+message KafkaTaskCompletion {
+  uint32 task_id = 1;
+  string status = 2;        // e.g., COMPLETED, FAILED
+  string result = 3;        // JSON string for task result (if status is COMPLETED)
+  string error_message = 4; // Error details (if status is FAILED)
+}

@@ -13,7 +13,7 @@ func TestEchoExecutor_Execute(t *testing.T) {
 		Name:           "Test Echo Task",
 		Params:         `{"message": "hello"}`,
 		ExecutorType:   "echo-executor",
-		ParamSchema:    "", // Not used by echo executor directly for validation
+		ParamSchema:    "",
 	}
 
 	result, err := executor.Execute(payload)

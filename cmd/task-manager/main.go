@@ -70,7 +70,8 @@ func main() {
 	generated_router.RegisterTaskTemplateService(h, taskTemplateServiceImpl)
 	stdlog.Println("Registered new TaskTemplateService routes.")
 
-	taskServiceImpl := generated_handler.NewTaskService(gormDB, kafkaProducer)
+	// Pass schedulerService to NewTaskService for dependency injection
+	taskServiceImpl := generated_handler.NewTaskService(gormDB, kafkaProducer, schedulerService)
 	generated_router.RegisterTaskService(h, taskServiceImpl) // Use the same generated_router package
 	stdlog.Println("Registered new TaskService routes.")
 	// --- End New Service Setup ---

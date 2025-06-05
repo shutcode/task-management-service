@@ -1,19 +1,21 @@
 package db
 
 import (
-	// "time" // No longer directly used here due to gorm.Model
+	"time" // Ensure time package is imported
+
 	"gorm.io/gorm"
 )
 
 // Task represents a task in the system.
 type Task struct {
-	gorm.Model     // Includes ID, CreatedAt, UpdatedAt, DeletedAt
-	TaskTemplateID uint   `json:"task_template_id"` // Foreign key to TaskTemplate
-	Name           string `json:"name" gorm:"index"`
-	Description    string `json:"description"`
-	Params         string `json:"params" gorm:"type:json"` // Store JSON string
-	Status         string `json:"status" gorm:"index"`   // e.g., PENDING, RUNNING, COMPLETED, FAILED
+	gorm.Model            // Includes ID, CreatedAt, UpdatedAt, DeletedAt
+	TaskTemplateID uint   `json:"task_template_id"`      // Foreign key to TaskTemplate
+	Name           string `json:"name" gorm:"index"`     // Name of the task instance
+	Description    string `json:"description"`           // Description of the task instance
+	Params         string `json:"params" gorm:"type:json"` // Store JSON string, specific parameters for this task run
+	Status         string `json:"status" gorm:"index"`   // e.g., PENDING, SCHEDULED_ONCE, RUNNING, COMPLETED, FAILED
 	Result         string `json:"result" gorm:"type:json"` // Store JSON string for task result
+	RunAt          *time.Time `gorm:"index"`             // Specific time for one-time scheduled execution
 }
 
 // TaskTemplate represents a template for creating tasks.

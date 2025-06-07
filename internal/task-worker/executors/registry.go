@@ -16,11 +16,32 @@ type TaskPayload struct {
 	ParamSchema    string
 }
 
+// ExecutorType constants
+const (
+	ExecutorTypeEcho   = "echo-executor"
+	ExecutorTypePython = "python-executor"
+	// Add other executor types here
+)
+
 type Executor interface {
 	Execute(taskPayload TaskPayload) (result string, err error)
 }
 
 var Registry = make(map[string]Executor)
+
+// init function to register all known executors
+func init() {
+	// Register EchoExecutor (assuming it's defined in this package)
+	// If EchoExecutor is simple and has no state, an instance can be directly created.
+	// If it's in a different file but same package, it's directly accessible.
+	RegisterExecutor(ExecutorTypeEcho, &EchoExecutor{})
+
+	// Register PythonExecutor
+	RegisterExecutor(ExecutorTypePython, &PythonExecutor{})
+
+	// Register other executors here
+	log.Println("Executor registry initialized with known executors.")
+}
 
 func RegisterExecutor(executorType string, executor Executor) {
 	log.Printf("Registering executor for type: %s", executorType)

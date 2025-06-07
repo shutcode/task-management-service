@@ -28,7 +28,8 @@ const (
 
 func main() {
 	log.Println("Starting Task Worker Service (Protobuf mode)...")
-	executors.RegisterExecutor("echo-executor", &executors.EchoExecutor{})
+	// Executors are now registered via init() in the executors package.
+	// No need to call RegisterExecutor here explicitly.
 
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS"); if kafkaBrokers == "" { kafkaBrokers = DefaultKafkaBrokers }
 	taskTopic := os.Getenv("TASK_TOPIC"); if taskTopic == "" { taskTopic = DefaultTaskTopic }

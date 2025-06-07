@@ -26,26 +26,59 @@ type KafkaProducerInterface interface {
 	Stats() kafka.WriterStats
 }
 
-type TaskServiceImpl struct {
-	DB       *gorm.DB
-	Producer KafkaProducerInterface
+// SchedulerInterface defines the methods our HTTP handler needs from the SchedulerService.
+// This allows for decoupling and easier testing.
+type SchedulerInterface interface {
+	ScheduleOrUpdateTask(task *gorm_models.Task) error
 }
 
-func NewTaskService(db *gorm.DB, producer KafkaProducerInterface) *TaskServiceImpl {
-	return &TaskServiceImpl{DB: db, Producer: producer}
+type TaskServiceImpl struct {
+	DB        *gorm.DB
+	Producer  KafkaProducerInterface
+	Scheduler SchedulerInterface // Use an interface for the scheduler
+}
+
+func NewTaskService(db *gorm.DB, producer KafkaProducerInterface, scheduler SchedulerInterface) *TaskServiceImpl {
+	return &TaskServiceImpl{DB: db, Producer: producer, Scheduler: scheduler}
+}
+
+// Helper function to convert *timestamppb.Timestamp to *time.Time
+func protoTimestampToTimePtr(ts *timestamppb.Timestamp) *time.Time {
+	if ts == nil || !ts.IsValid() {
+		return nil
+	}
+	t := ts.AsTime()
+	return &t
+}
+
+// Helper function to convert *time.Time to *timestamppb.Timestamp
+func timePtrToProtoTimestamp(t *time.Time) *timestamppb.Timestamp {
+	if t == nil {
+		return nil
+	}
+	return timestamppb.New(*t)
 }
 
 func toProtoTask(dbTask *gorm_models.Task) *pb_task.Task {
-	if dbTask == nil { return nil }
+	if dbTask == nil {
+		return nil
+	}
 	return &pb_task.Task{
-		Id: uint32(dbTask.ID), TaskTemplateId: uint32(dbTask.TaskTemplateID), Name: dbTask.Name,
-		Description: dbTask.Description, Params: dbTask.Params, Status: dbTask.Status,
-		Result: dbTask.Result, CreatedAt: timestamppb.New(dbTask.CreatedAt), UpdatedAt: timestamppb.New(dbTask.UpdatedAt),
+		Id:             uint32(dbTask.ID),
+		TaskTemplateId: uint32(dbTask.TaskTemplateID),
+		Name:           dbTask.Name,
+		Description:    dbTask.Description,
+		Params:         dbTask.Params,
+		Status:         dbTask.Status,
+		Result:         dbTask.Result,
+		CreatedAt:      timestamppb.New(dbTask.CreatedAt),
+		UpdatedAt:      timestamppb.New(dbTask.UpdatedAt),
+		RunAt:          timePtrToProtoTimestamp(dbTask.RunAt),
 	}
 }
 
 func (s *TaskServiceImpl) CreateTask(ctx context.Context, c *app.RequestContext, req *pb_task.CreateTaskRequest) (*pb_task.CreateTaskResponse, error) {
-	log.Printf("TaskServiceImpl: CreateTask called with Name: %s, TemplateID: %d", req.Name, req.TaskTemplateId)
+	log.Printf("TaskServiceImpl: CreateTask called with Name: %s, TemplateID: %d, RunAt: %v", req.Name, req.TaskTemplateId, req.RunAt)
 	var template gorm_models.TaskTemplate
 	if err := s.DB.First(&template, req.TaskTemplateId).Error; err != nil {
 		return nil, fmt.Errorf("task template ID %d not found: %w", req.TaskTemplateId, err)
@@ -55,54 +88,85 @@ func (s *TaskServiceImpl) CreateTask(ctx context.Context, c *app.RequestContext,
 			return nil, fmt.Errorf("task parameters do not match template schema: %w", err)
 		}
 	}
+
 	dbTask := gorm_models.Task{
-		TaskTemplateID: uint(req.TaskTemplateId), Name: req.Name, Description: req.Description,
-		Params: req.Params, Status: "PENDING",
+		TaskTemplateID: uint(req.TaskTemplateId),
+		Name:           req.Name,
+		Description:    req.Description,
+		Params:         req.Params,
+		// Status and RunAt will be set below
+	}
+
+	isScheduledOnce := false
+	if req.RunAt != nil && req.RunAt.IsValid() && req.RunAt.AsTime().After(time.Now()) {
+		dbTask.Status = "SCHEDULED_ONCE"
+		dbTask.RunAt = protoTimestampToTimePtr(req.RunAt)
+		isScheduledOnce = true
+		log.Printf("TaskServiceImpl: Task %s for template ID %d will be scheduled for %v", req.Name, req.TaskTemplateId, dbTask.RunAt)
+	} else {
+		dbTask.Status = "PENDING"
+		if req.RunAt != nil {
+			log.Printf("TaskServiceImpl: Task %s for template ID %d RunAt is nil, invalid, or in the past (%v). Scheduling for immediate dispatch.", req.Name, req.TaskTemplateId, req.RunAt)
+		}
 	}
 
 	tx := s.DB.Begin() // Start a transaction
 	if tx.Error != nil {
 		log.Printf("TaskServiceImpl: Error starting transaction: %v", tx.Error)
-		return nil, tx.Error
+		return nil, fmt.Errorf("failed to start transaction: %w", tx.Error)
 	}
 
+	// Save task to DB
 	if result := tx.Create(&dbTask); result.Error != nil {
 		tx.Rollback()
 		log.Printf("TaskServiceImpl: Error creating task in DB: %v", result.Error)
-		return nil, result.Error
+		return nil, fmt.Errorf("failed to create task in db: %w", result.Error)
 	}
 
-	dispatchPayloadProto := &pb_kafka.KafkaTaskDispatch{
-		TaskId:         uint32(dbTask.ID), TaskTemplateId: uint32(dbTask.TaskTemplateID), Name: dbTask.Name,
-		Params: dbTask.Params, ExecutorType: template.ExecutorType, ParamSchema: template.ParamSchema,
-	}
-	payloadBytes, err := proto.Marshal(dispatchPayloadProto)
-	if err != nil {
-		tx.Rollback()
-		log.Printf("TaskServiceImpl: Error marshalling KafkaTaskDispatch (Protobuf) for task ID %d: %v", dbTask.ID, err)
-		return nil, fmt.Errorf("failed to marshal kafka payload: %w", err)
-	}
+	if isScheduledOnce {
+		// Task is scheduled for later execution.
+		if err := s.Scheduler.ScheduleOrUpdateTask(&dbTask); err != nil {
+			tx.Rollback() // Rollback DB transaction if scheduling fails
+			log.Printf("TaskServiceImpl: Error scheduling one-time task ID %d: %v", dbTask.ID, err)
+			return nil, fmt.Errorf("failed to schedule task for later execution: %w", err)
+		}
+		log.Printf("TaskServiceImpl: Task ID %d (%s) successfully scheduled with status 'SCHEDULED_ONCE' for RunAt %v. Kafka dispatch deferred.", dbTask.ID, dbTask.Name, dbTask.RunAt)
+	} else {
+		// Task is for immediate dispatch.
+		dispatchPayloadProto := &pb_kafka.KafkaTaskDispatch{
+			TaskId:         uint32(dbTask.ID),
+			TaskTemplateId: uint32(dbTask.TaskTemplateID),
+			Name:           dbTask.Name,
+			Params:         dbTask.Params,
+			ExecutorType:   template.ExecutorType,
+			ParamSchema:    template.ParamSchema,
+		}
+		payloadBytes, err := proto.Marshal(dispatchPayloadProto)
+		if err != nil {
+			tx.Rollback()
+			log.Printf("TaskServiceImpl: Error marshalling KafkaTaskDispatch (Protobuf) for task ID %d: %v", dbTask.ID, err)
+			return nil, fmt.Errorf("failed to marshal kafka payload: %w", err)
+		}
 
-	kafkaMsg := kafka.Message{ Key: []byte(strconv.FormatUint(uint64(dbTask.ID), 10)), Value: payloadBytes }
-	kafkaWriteCtx, kafkaCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer kafkaCancel()
+		kafkaMsg := kafka.Message{Key: []byte(strconv.FormatUint(uint64(dbTask.ID), 10)), Value: payloadBytes}
+		kafkaWriteCtx, kafkaCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer kafkaCancel()
 
-	if err := s.Producer.WriteMessages(kafkaWriteCtx, kafkaMsg); err != nil {
-		tx.Rollback()
-		log.Printf("TaskServiceImpl: Error sending Protobuf task ID %d to Kafka: %v", dbTask.ID, err)
-		// It's important to decide if this error should also fail the HTTP request.
-		// For now, we'll make it fail the request.
-		return nil, fmt.Errorf("failed to dispatch task to kafka: %w", err)
+		if err := s.Producer.WriteMessages(kafkaWriteCtx, kafkaMsg); err != nil {
+			tx.Rollback()
+			log.Printf("TaskServiceImpl: Error sending Protobuf task ID %d to Kafka: %v", dbTask.ID, err)
+			return nil, fmt.Errorf("failed to dispatch task to kafka: %w", err)
+		}
+		log.Printf("TaskServiceImpl: Protobuf Task ID %d dispatched to Kafka topic %s", dbTask.ID, s.Producer.Stats().Topic)
 	}
 
 	if err := tx.Commit().Error; err != nil {
 		log.Printf("TaskServiceImpl: Error committing transaction: %v", err)
-		// Kafka message was sent, but DB commit failed. This is a problematic state (distributed transaction).
-		// Needs a compensation strategy (e.g., log for manual intervention, or try to retract Kafka message if possible).
+		// If Kafka message was sent (for non-scheduled tasks), but DB commit failed, this is a problematic state.
+		// Needs a compensation strategy. For scheduled tasks, it's less critical if Kafka wasn't involved yet.
 		return nil, fmt.Errorf("failed to commit task creation: %w", err)
 	}
 
-	log.Printf("TaskServiceImpl: Protobuf Task ID %d dispatched to Kafka topic %s", dbTask.ID, s.Producer.Stats().Topic)
 	return &pb_task.CreateTaskResponse{Task: toProtoTask(&dbTask)}, nil
 }
 
